@@ -4,7 +4,8 @@ project_name = "Video Converter"
 bundle = "com.videoconverter"
 version = "0.1.0"
 url = "https://github.com/Th3-A6add0n"
-license.file = "LICENSE"
+license = "MIT"
+license-files = ["LICENSE"]
 author = "Th3-A6add0n"
 author_email = "th3.a6add0n@gmail.com"
 
