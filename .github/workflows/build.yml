@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------
-  # Fast sanity check: install deps + run unit tests on all platforms.
+  # Unit tests on all three OSes. No GUI toolkit required.
   # ---------------------------------------------------------------------
   test:
     name: Test (${{ matrix.os }})
@@ -41,7 +41,7 @@ jobs:
         run: pytest -q tests/
 
   # ---------------------------------------------------------------------
-  # Package with Briefcase on each supported platform/arch.
+  # Package on Windows, macOS Intel, macOS Apple Silicon, Linux AppImage.
   # ---------------------------------------------------------------------
   package:
     name: Package (${{ matrix.label }})
@@ -63,10 +63,10 @@ jobs:
             runner:  macos-14
             target:  macOS
             format:  ""
-          - label:   Linux x64
-            runner:  ubuntu-latest
+          - label:   Linux AppImage
+            runner:  ubuntu-22.04
             target:  linux
-            format:  system
+            format:  appimage
 
     steps:
       - uses: actions/checkout@v4
@@ -86,7 +86,7 @@ jobs:
             libxcb-image0 libxcb-cursor0 libxcb-shape0 libxcb-randr0 \
             libxcb-xfixes0 libxcb-sync1 libxcb-icccm4 libxcb-keysyms1 \
             libfontconfig1 libsm6 libice6 libglib2.0-0 libgl1 libegl1 \
-            libdbus-1-3 xvfb
+            libdbus-1-3 xvfb fuse libfuse2
 
       - name: Install Python dependencies
         run: |
@@ -102,8 +102,6 @@ jobs:
 
       - name: Briefcase package
         run: briefcase package ${{ matrix.target }} ${{ matrix.format }} --adhoc-sign
-        # `--adhoc-sign` avoids requiring code-signing secrets. Remove it
-        # and configure signing certificates for notarized release builds.
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -114,7 +112,7 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------
-  # Attach artifacts to a GitHub Release when a version tag is pushed.
+  # Publish to GitHub Releases on version tags.
   # ---------------------------------------------------------------------
   release:
     name: Release
@@ -142,9 +140,6 @@ jobs:
             artifacts/**/*.zip
             artifacts/**/*.dmg
             artifacts/**/*.pkg
-            artifacts/**/*.tar.gz
             artifacts/**/*.AppImage
-            artifacts/**/*.deb
-            artifacts/**/*.rpm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
