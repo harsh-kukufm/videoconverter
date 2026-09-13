@@ -41,7 +41,14 @@ jobs:
         run: pytest -q tests/
 
   # ---------------------------------------------------------------------
-  # Package on Windows, macOS Intel, macOS Apple Silicon.
+  # Package on Windows x64 and a single universal macOS build.
+  #
+  # The macOS build runs on an Apple Silicon runner (macos-14) and
+  # produces a Universal 2 .app containing both arm64 and x86_64 slices,
+  # because pyproject.toml declares universal_build = true.
+  #
+  # fail-fast is off so a single platform failure does not cancel the
+  # others.
   # ---------------------------------------------------------------------
   package:
     name: Package (${{ matrix.label }})
@@ -54,10 +61,7 @@ jobs:
           - label:   Windows x64
             runner:  windows-latest
             target:  windows
-          - label:   macOS Intel
-            runner:  macos-13
-            target:  macOS
-          - label:   macOS Apple Silicon
+          - label:   macOS Universal
             runner:  macos-14
             target:  macOS
 
@@ -95,28 +99,54 @@ jobs:
 
   # ---------------------------------------------------------------------
   # Publish to GitHub Releases on version tags.
+  #
+  # Runs even if some packaging jobs failed, so long as at least one
+  # artifact was produced.
   # ---------------------------------------------------------------------
   release:
     name: Release
-    needs: package
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, package]
+    if: |
+      always() &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.test.result == 'success' &&
+      needs.package.result != 'cancelled' &&
+      needs.package.result != 'skipped'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all build artifacts
+      - name: Download available artifacts
+        id: download
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
+        continue-on-error: true
 
-      - name: List downloaded files
-        run: find artifacts -maxdepth 3 -type f
+      - name: Report what we have
+        id: list
+        run: |
+          echo "Downloaded artifacts:"
+          find artifacts -maxdepth 3 -type f || true
+          count=$(find artifacts -type f \
+            \( -name '*.msi' -o -name '*.zip' -o -name '*.dmg' \
+               -o -name '*.pkg' -o -name '*.AppImage' -o -name '*.flatpak' \) \
+            | wc -l)
+          echo "installer_count=$count" >> "$GITHUB_OUTPUT"
+
+      - name: Skip publish if nothing was built
+        if: steps.list.outputs.installer_count == '0'
+        run: |
+          echo "::warning::No installers were produced; skipping release."
+          echo "This usually means every packaging job failed."
 
       - name: Publish GitHub Release
+        if: steps.list.outputs.installer_count != '0'
         uses: softprops/action-gh-release@v2
         with:
           draft: false
           generate_release_notes: true
+          fail_on_unmatched_files: false
           files: |
             artifacts/**/*.msi
             artifacts/**/*.zip
@@ -124,3 +154,9 @@ jobs:
             artifacts/**/*.pkg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Report partial failure
+        if: needs.package.result == 'failure' && steps.list.outputs.installer_count != '0'
+        run: |
+          echo "::warning::Release published with partial artifacts."
+          echo "At least one packaging job failed; see the package matrix above."
