@@ -17,6 +17,7 @@ sources = [
     "src/videoconverter",
 ]
 icon = "src/videoconverter/resources/icon"
+installer_icon = "src/videoconverter/resources/icon"
 requires = [
     "requests>=2.31",
     "PySide6-Essentials~=6.8",
