@@ -1,4 +1,4 @@
-"""FFmpeg command construction and the conversion worker thread."""
+"""Qt-threaded conversion worker. All pure logic lives in `encoding.py`."""
 from __future__ import annotations
 
 import logging
@@ -8,161 +8,31 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
+from .encoding import (
+    ConversionSettings,
+    FFmpegCommandBuilder,
+    decode_return_code,
+    sanitize_command,
+)
 from .ffmpeg_manager import FFmpegManager
-from .hardware import Backend, BackendInfo
+from .hardware import BackendInfo
 from .jobs import ConversionJob, JobState
-from .media_probe import MediaInfo, MediaProbe
+from .media_probe import MediaProbe
 from .util import no_window_kwargs
 
 log = logging.getLogger("videoconverter.converter")
 
-MP4_AUDIO_COPY_OK = {"aac", "mp3", "ac3", "eac3", "alac"}
-
-
-# ----------------------------------------------------------------- settings
-
-@dataclass
-class ConversionSettings:
-    max_resolution: int = 1920
-    quality: str = "balanced"
-    audio_bitrate: str = "192k"
-    overwrite: bool = False
-    output_option: int = 2       # 1 custom, 2 same-as-source
-    custom_output_dir: str = ""
-
-
-# ----------------------------------------------------------------- scaling
-
-def _even(n: int) -> int:
-    return n - (n % 2)
-
-
-def compute_scaling(width: int, height: int, max_dim: int) -> Optional[tuple[int, int]]:
-    """Return (w, h) if downscale is required. Never upscales. Never returns a
-    dimension below 2."""
-    if width <= 0 or height <= 0 or max_dim <= 0:
-        return None
-    longest = max(width, height)
-    if longest <= max_dim:
-        return None
-    scale = max_dim / longest
-    nw = max(2, _even(int(width * scale)))
-    nh = max(2, _even(int(height * scale)))
-    return nw, nh
-
-
-# ---------------------------------------------------------- command builder
-
-class FFmpegCommandBuilder:
-    def __init__(self, ffmpeg: FFmpegManager):
-        self.ffmpeg = ffmpeg
-
-    def build(
-        self,
-        input_path: Path,
-        output_path: Path,
-        media: MediaInfo,
-        backend: BackendInfo,
-        settings: ConversionSettings,
-    ) -> list[str]:
-        if not self.ffmpeg.ffmpeg_path:
-            raise RuntimeError("FFmpeg path not set")
-
-        cmd: list[str] = [
-            str(self.ffmpeg.ffmpeg_path),
-            "-hide_banner", "-nostdin",
-            "-loglevel", "error",
-            "-progress", "pipe:1", "-nostats",
-            "-y",
-            "-i", str(input_path),
-        ]
-
-        vf: list[str] = []
-        if backend.backend in (Backend.AMD_VAAPI, Backend.INTEL_VAAPI):
-            cmd += ["-vaapi_device", "/dev/dri/renderD128"]
-
-        scaling = compute_scaling(media.width, media.height, settings.max_resolution)
-        if scaling:
-            vf.append(f"scale={scaling[0]}:{scaling[1]}:flags=lanczos")
-
-        if backend.backend in (Backend.AMD_VAAPI, Backend.INTEL_VAAPI):
-            vf.append("format=nv12")
-            vf.append("hwupload")
-
-        if vf:
-            cmd += ["-vf", ",".join(vf)]
-
-        # ------------------------------------------ encoder-specific arguments
-        enc = backend.encoder
-        q = settings.quality
-
-        if backend.backend is Backend.CPU:
-            cmd += ["-c:v", enc]
-            if enc in ("libx265", "libx264"):
-                preset = {"fast": "fast", "balanced": "medium", "quality": "slow"}.get(q, "medium")
-                crf = {"fast": "26", "balanced": "24", "quality": "21"}.get(q, "24")
-                cmd += ["-preset", preset, "-crf", crf]
-            cmd += ["-pix_fmt", "yuv420p"]
-            if enc == "libx265":
-                cmd += ["-tag:v", "hvc1"]
-
-        elif backend.backend is Backend.NVIDIA_NVENC:
-            cmd += ["-c:v", enc]
-            preset = {"fast": "p3", "balanced": "p5", "quality": "p7"}.get(q, "p5")
-            cq = {"fast": "28", "balanced": "24", "quality": "21"}.get(q, "24")
-            cmd += ["-preset", preset, "-rc", "vbr", "-cq", cq, "-b:v", "0"]
-            cmd += ["-tag:v", "hvc1"]
-
-        elif backend.backend is Backend.AMD_AMF:
-            cmd += ["-c:v", enc]
-            quality = {"fast": "speed", "balanced": "balanced", "quality": "quality"}.get(q, "balanced")
-            cqp = {"fast": "26", "balanced": "24", "quality": "22"}.get(q, "24")
-            cmd += ["-quality", quality, "-rc", "cqp",
-                    "-qp_i", cqp, "-qp_p", cqp, "-qp_b", cqp]
-            cmd += ["-tag:v", "hvc1"]
-
-        elif backend.backend in (Backend.AMD_VAAPI, Backend.INTEL_VAAPI):
-            cmd += ["-c:v", enc]
-            qp = {"fast": "26", "balanced": "24", "quality": "22"}.get(q, "24")
-            cmd += ["-qp", qp]
-            cmd += ["-tag:v", "hvc1"]
-
-        elif backend.backend is Backend.APPLE_VIDEOTOOLBOX:
-            cmd += ["-c:v", enc]
-            qv = {"fast": "50", "balanced": "65", "quality": "80"}.get(q, "65")
-            cmd += ["-q:v", qv, "-tag:v", "hvc1"]
-
-        else:
-            # Defensive last-resort
-            cmd += ["-c:v", "libx265", "-preset", "medium", "-crf", "24", "-tag:v", "hvc1"]
-
-        # ------------------------------------------------ audio
-        if media.nb_audio_streams == 0:
-            cmd += ["-an"]
-        else:
-            ac = (media.audio_codec or "").lower()
-            if ac in MP4_AUDIO_COPY_OK:
-                cmd += ["-c:a", "copy"]
-            else:
-                cmd += ["-c:a", "aac", "-b:a", settings.audio_bitrate]
-
-        cmd += ["-movflags", "+faststart", str(output_path)]
-        return cmd
-
-
-# ------------------------------------------------------------------- worker
 
 class ConversionWorker(QThread):
-    progress = Signal(int, int, str)          # index, percent, status
+    progress = Signal(int, int, str)           # index, percent, status
     log_line = Signal(str)
     job_state_changed = Signal(int, str)
-    finished_all = Signal(int, int)           # success_count, total
+    finished_all = Signal(int, int)            # success_count, total
 
     def __init__(
         self,
@@ -257,8 +127,7 @@ class ConversionWorker(QThread):
         final_path.parent.mkdir(parents=True, exist_ok=True)
 
         # FFmpeg picks its muxer from the output filename extension, so the
-        # temporary file MUST keep the real container extension (e.g. ".mp4").
-        # We only hide/uniquify it via a dotted prefix + random suffix.
+        # temp file MUST keep the real container extension (e.g. ".mp4").
         fd, tmp_str = tempfile.mkstemp(
             prefix=f".{final_path.stem}.vc_tmp_",
             suffix=final_path.suffix,
@@ -266,7 +135,6 @@ class ConversionWorker(QThread):
         )
         os.close(fd)
         tmp_path = Path(tmp_str)
-        # FFmpeg will overwrite with -y; ensure we can delete on any failure.
         try:
             tmp_path.unlink()
         except OSError:
@@ -276,7 +144,7 @@ class ConversionWorker(QThread):
         self.log_line.emit(
             f"[▶] {in_path.name} → {final_path.name} via {self.backend.backend.value}"
         )
-        log.info("Command: %s", _sanitize_cmd(cmd))
+        log.info("Command: %s", sanitize_command(cmd))
 
         job.started_at = time.time()
         rc = self._run_ffmpeg(cmd, index, media.duration)
@@ -289,13 +157,12 @@ class ConversionWorker(QThread):
 
         if rc != 0:
             tmp_path.unlink(missing_ok=True)
-            raise RuntimeError(f"ffmpeg exited with code {rc}")
+            raise RuntimeError(f"ffmpeg exited with code {decode_return_code(rc)}")
 
         if not tmp_path.exists() or tmp_path.stat().st_size == 0:
             tmp_path.unlink(missing_ok=True)
             raise RuntimeError("Output file missing or empty after conversion")
 
-        # Optional post-probe
         try:
             self._probe.probe(tmp_path)
         except Exception as e:
@@ -382,14 +249,3 @@ class ConversionWorker(QThread):
                 if line.strip():
                     log.debug("ffmpeg: %s", line)
         return proc.returncode
-
-
-def _sanitize_cmd(cmd: list[str]) -> str:
-    """Keep the command informative without leaking the full user path list."""
-    out: list[str] = []
-    for token in cmd:
-        if os.sep in token or (os.altsep and os.altsep in token):
-            out.append(Path(token).name)
-        else:
-            out.append(token)
-    return " ".join(out)
