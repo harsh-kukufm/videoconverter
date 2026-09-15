@@ -71,6 +71,7 @@ def _parse_hwaccels(output: str) -> set[str]:
             names.add(line)
     return names
 
+
 class UpdateStatus(str, Enum):
     NOT_INSTALLED = "not_installed"
     UP_TO_DATE = "up_to_date"
@@ -115,6 +116,7 @@ def _parse_semver(version_line: str) -> Optional[tuple[int, int, int]]:
         return None
     return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
 
+
 class FFmpegManager:
     def __init__(self, platform: PlatformInfo, ffmpeg_root: Optional[Path] = None):
         self.platform = platform
@@ -155,24 +157,34 @@ class FFmpegManager:
             return False
 
     def locate(self) -> bool:
-        """Prefer a managed install; fall back to PATH."""
         if self.ffmpeg_root.exists():
             found = self._find_binaries(self.ffmpeg_root)
-            if found and self._binary_runs(found[0]):
+            if found and found[1] is not None \
+                    and self._binary_runs(found[0]) \
+                    and Path(found[1]).exists():
                 self.ffmpeg_path = found[0]
-                self.ffprobe_path = found[1] or found[0].with_name(self._exe("ffprobe"))
+                self.ffprobe_path = found[1]
                 log.info("Using managed FFmpeg at %s", self.ffmpeg_path)
+                log.info("Using managed ffprobe at %s", self.ffprobe_path)
                 return True
+            if found:
+                log.warning(
+                    "Managed FFmpeg at %s is incomplete "
+                    "(ffprobe missing); falling back to PATH",
+                    self.ffmpeg_root,
+                )
 
         ff = shutil.which(self._exe("ffmpeg"))
-        if ff:
-            ffp = Path(ff)
+        fp = shutil.which(self._exe("ffprobe"))
+        if ff and fp:
+            ffp, fpp = Path(ff), Path(fp)
             if self._binary_runs(ffp):
-                fp = shutil.which(self._exe("ffprobe"))
                 self.ffmpeg_path = ffp
-                self.ffprobe_path = Path(fp) if fp else ffp.with_name(self._exe("ffprobe"))
+                self.ffprobe_path = fpp
                 log.info("Using system FFmpeg at %s", self.ffmpeg_path)
+                log.info("Using system ffprobe at %s", self.ffprobe_path)
                 return True
+
         return False
 
     # ------------------------------------------------------------- capabilities
@@ -184,15 +196,28 @@ class FFmpegManager:
             raise FFmpegError("FFmpeg not located")
 
         caps = FFmpegCapabilities()
-        caps.version_line = self._run_text(["-version"]).splitlines()[0] if self.ffmpeg_path else ""
-        caps.encoders = _parse_ffmpeg_list(self._run_text(["-hide_banner", "-encoders"]))
-        caps.decoders = _parse_ffmpeg_list(self._run_text(["-hide_banner", "-decoders"]))
-        caps.hwaccels = _parse_hwaccels(self._run_text(["-hide_banner", "-hwaccels"]))
+        caps.version_line = (
+            self._run_text(["-version"]).splitlines()[0]
+            if self.ffmpeg_path else ""
+        )
+        caps.encoders = _parse_ffmpeg_list(
+            self._run_text(["-hide_banner", "-encoders"])
+        )
+        caps.decoders = _parse_ffmpeg_list(
+            self._run_text(["-hide_banner", "-decoders"])
+        )
+        caps.hwaccels = _parse_hwaccels(
+            self._run_text(["-hide_banner", "-hwaccels"])
+        )
         # filters output has a different shape; use a tolerant parse
-        caps.filters = _parse_ffmpeg_list(self._run_text(["-hide_banner", "-filters"]))
+        caps.filters = _parse_ffmpeg_list(
+            self._run_text(["-hide_banner", "-filters"])
+        )
         self.capabilities = caps
-        log.info("FFmpeg capabilities: %d encoders, hwaccels=%s",
-                 len(caps.encoders), sorted(caps.hwaccels))
+        log.info(
+            "FFmpeg capabilities: %d encoders, hwaccels=%s",
+            len(caps.encoders), sorted(caps.hwaccels),
+        )
         return caps
 
     def _run_text(self, args: list[str]) -> str:
@@ -340,26 +365,45 @@ class FFmpegManager:
         return UpdateCheck(UpdateStatus.UP_TO_DATE,
                            local_version=local_s, remote_version=remote_s)
 
-    def artifact_url(self) -> tuple[str, str]:
-        """Return (url, extension) for the current platform."""
+    def artifact_urls(self) -> list[tuple[str, str]]:
+        """Return a list of (url, extension) pairs for the current platform.
+
+        Most platforms ship a single archive containing both ffmpeg and ffprobe.
+        macOS is the exception: evermeet.cx publishes ffmpeg and ffprobe as
+        separate universal (Intel + Apple Silicon) archives.
+        """
         o, a = self.platform.os, self.platform.arch
+
         if o is OSType.WINDOWS:
             if a is ArchType.ARM64:
-                return ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
-                        "ffmpeg-master-latest-winarm64-gpl.zip", ".zip")
-            return ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
-                    "ffmpeg-master-latest-win64-gpl.zip", ".zip")
+                return [(
+                    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+                    "ffmpeg-master-latest-winarm64-gpl.zip", ".zip",
+                )]
+            return [(
+                "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+                "ffmpeg-master-latest-win64-gpl.zip", ".zip",
+            )]
+
         if o is OSType.MACOS:
-            # evermeet provides universal/Intel; osxexperts provides arm64.
-            if a is ArchType.ARM64:
-                return ("https://www.osxexperts.net/ffmpeg71arm.zip", ".zip")
-            return ("https://evermeet.cx/ffmpeg/getrelease/zip", ".zip")
+            # evermeet.cx builds are universal binaries and work on both
+            # Intel and Apple Silicon. ffmpeg and ffprobe come as separate zips.
+            return [
+                ("https://evermeet.cx/ffmpeg/getrelease/zip",  ".zip"),
+                ("https://evermeet.cx/ffprobe/getrelease/zip", ".zip"),
+            ]
+
         if o is OSType.LINUX:
             if a is ArchType.ARM64:
-                return ("https://johnvansickle.com/ffmpeg/releases/"
-                        "ffmpeg-release-arm64-static.tar.xz", ".tar.xz")
-            return ("https://johnvansickle.com/ffmpeg/releases/"
-                    "ffmpeg-release-amd64-static.tar.xz", ".tar.xz")
+                return [(
+                    "https://johnvansickle.com/ffmpeg/releases/"
+                    "ffmpeg-release-arm64-static.tar.xz", ".tar.xz",
+                )]
+            return [(
+                "https://johnvansickle.com/ffmpeg/releases/"
+                "ffmpeg-release-amd64-static.tar.xz", ".tar.xz",
+            )]
+
         raise FFmpegError(f"Unsupported platform: {o} / {a}")
 
     def install(
@@ -367,7 +411,7 @@ class FFmpegManager:
         progress_cb: Optional[Callable[[int, str], None]] = None,
         cancel_cb: Optional[Callable[[], bool]] = None,
     ) -> None:
-        url, ext = self.artifact_url()
+        artifacts = self.artifact_urls()
 
         def emit(pct: int, msg: str) -> None:
             log.info("FFmpeg install: %s%% %s", pct, msg)
@@ -378,29 +422,45 @@ class FFmpegManager:
 
         with tempfile.TemporaryDirectory(prefix="vc_ffmpeg_") as tmpdir:
             tmp = Path(tmpdir)
-            archive = tmp / f"ffmpeg{ext}"
             extract_root = tmp / "extract"
             extract_root.mkdir()
 
-            def dl_progress(done: int, total: int) -> None:
-                pct = int((done / total) * 85) if total else 0
-                emit(min(pct, 85), f"Downloading FFmpeg: {done // (1024 * 1024)} MiB")
+            n = len(artifacts)
+            for i, (url, ext) in enumerate(artifacts):
+                base = int((i / n) * 85)
+                span = int(85 / n)
+                archive = tmp / f"artifact_{i}{ext}"
 
-            download_file(url, archive, progress_cb=dl_progress, cancel_cb=cancel_cb)
-            if cancel_cb and cancel_cb():
-                raise DownloadError("Cancelled")
+                def dl_progress(done: int, total: int,
+                                _base=base, _span=span, _i=i) -> None:
+                    pct = _base + (int((done / total) * _span) if total else 0)
+                    emit(min(pct, 85),
+                         f"Downloading {_i + 1}/{n}: "
+                         f"{done // (1024 * 1024)} MiB")
 
-            emit(88, "Extracting archive…")
-            if ext == ".zip":
-                safe_extract_zip(archive, extract_root)
-            else:
-                safe_extract_tar(archive, extract_root)
+                download_file(url, archive,
+                              progress_cb=dl_progress, cancel_cb=cancel_cb)
+                if cancel_cb and cancel_cb():
+                    raise DownloadError("Cancelled")
 
-            emit(93, "Locating binaries…")
+                if ext == ".zip":
+                    safe_extract_zip(archive, extract_root)
+                else:
+                    safe_extract_tar(archive, extract_root)
+
+            emit(88, "Locating binaries…")
             found = self._find_binaries(extract_root)
             if not found:
-                raise FFmpegError("ffmpeg binary not present in archive")
+                raise FFmpegError("No ffmpeg binary found in downloaded archives")
+
             src_ffmpeg, src_ffprobe = found
+
+            if src_ffprobe is None or not src_ffprobe.exists():
+                raise FFmpegError(
+                    "Downloaded archives did not contain ffprobe. "
+                    "This is a packaging error in the upstream build; "
+                    "please report it."
+                )
 
             if not self._binary_runs(src_ffmpeg):
                 raise FFmpegError("Downloaded ffmpeg failed validation")
@@ -408,7 +468,6 @@ class FFmpegManager:
             emit(96, "Installing atomically…")
             self._atomic_install(src_ffmpeg, src_ffprobe)
 
-            # Reset cached capabilities and re-inspect
             self.capabilities = None
             emit(100, "FFmpeg installed")
             try:
@@ -416,7 +475,12 @@ class FFmpegManager:
             except FFmpegError:
                 pass
 
-    def _atomic_install(self, src_ffmpeg: Path, src_ffprobe: Optional[Path]) -> None:
+    def _atomic_install(self, src_ffmpeg: Path, src_ffprobe: Path) -> None:
+        if not src_ffprobe or not src_ffprobe.exists():
+            raise FFmpegError(
+                "Refusing to install: ffprobe missing from downloaded payload"
+            )
+
         root = self.ffmpeg_root
         parent = root.parent
         parent.mkdir(parents=True, exist_ok=True)
@@ -430,35 +494,29 @@ class FFmpegManager:
 
         try:
             tgt_ff = staging / src_ffmpeg.name
+            tgt_fp = staging / src_ffprobe.name
             shutil.copy2(src_ffmpeg, tgt_ff)
-            if src_ffprobe and src_ffprobe.exists() and src_ffprobe != src_ffmpeg:
-                shutil.copy2(src_ffprobe, staging / src_ffprobe.name)
+            shutil.copy2(src_ffprobe, tgt_fp)
 
-            for p in staging.iterdir():
-                if p.is_file():
-                    try:
-                        os.chmod(p, p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-                    except OSError:
-                        pass
+            for p in (tgt_ff, tgt_fp):
+                try:
+                    os.chmod(p, p.stat().st_mode
+                             | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                except OSError:
+                    pass
 
-            # Final validation on staged binary before swap
             if not self._binary_runs(tgt_ff):
                 raise FFmpegError("Staged ffmpeg failed validation")
 
             if root.exists():
-                os.replace(root, backup) if False else os.rename(root, backup)
+                os.rename(root, backup)
             os.rename(staging, root)
             if backup.exists():
                 shutil.rmtree(backup, ignore_errors=True)
 
             self.ffmpeg_path = root / src_ffmpeg.name
-            self.ffprobe_path = (
-                root / src_ffprobe.name if (src_ffprobe and src_ffprobe.exists()
-                                            and src_ffprobe != src_ffmpeg)
-                else self.ffmpeg_path
-            )
+            self.ffprobe_path = root / src_ffprobe.name
         except Exception:
-            # Restore previous install if possible
             if backup.exists() and not root.exists():
                 try:
                     os.rename(backup, root)
