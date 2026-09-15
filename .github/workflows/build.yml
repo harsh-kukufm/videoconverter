@@ -80,6 +80,41 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install briefcase
 
+      - name: Stamp version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "Stamping pyproject.toml with version: $VERSION"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::Tag '$TAG' does not contain a valid version (expected vX.Y.Z)"
+            exit 1
+          fi
+
+          python - <<PY
+          import re
+          import pathlib
+
+          version = "$VERSION"
+          path = pathlib.Path("pyproject.toml")
+          text = path.read_text(encoding="utf-8")
+          new_text, count = re.subn(
+              r'^version\s*=\s*"[^"]*"',
+              f'version = "{version}"',
+              text,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          if count != 1:
+              raise SystemExit("Could not find a version field in pyproject.toml")
+          path.write_text(new_text, encoding="utf-8")
+          print(f"Set version to {version}")
+          PY
+
+          grep -E '^version\s*=' pyproject.toml
+
       - name: Briefcase create
         run: briefcase create ${{ matrix.target }}
 
