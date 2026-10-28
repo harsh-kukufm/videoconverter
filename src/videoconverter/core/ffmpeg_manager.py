@@ -25,6 +25,7 @@ from .downloader import (
     safe_extract_zip,
 )
 from .platform_info import ArchType, OSType, PlatformInfo
+from .system_ffmpeg import find_system_ffmpeg, update_hint
 from .util import no_window_kwargs
 
 log = logging.getLogger("videoconverter.ffmpeg")
@@ -32,6 +33,13 @@ log = logging.getLogger("videoconverter.ffmpeg")
 
 class FFmpegError(Exception):
     pass
+
+
+class FFmpegSource(str, Enum):
+    """Where the located FFmpeg came from."""
+    MANAGED = "managed"   # downloaded & managed by this app
+    SYSTEM = "system"     # found on the machine (brew, winget, apt, …)
+    NONE = "none"
 
 
 @dataclass
@@ -124,6 +132,8 @@ class FFmpegManager:
         self.ffmpeg_path: Optional[Path] = None
         self.ffprobe_path: Optional[Path] = None
         self.capabilities: Optional[FFmpegCapabilities] = None
+        self.source: FFmpegSource = FFmpegSource.NONE
+        self.source_origin: str = ""
 
     # ------------------------------------------------------------------ locate
 
@@ -164,6 +174,8 @@ class FFmpegManager:
                     and Path(found[1]).exists():
                 self.ffmpeg_path = found[0]
                 self.ffprobe_path = found[1]
+                self.source = FFmpegSource.MANAGED
+                self.source_origin = "app-managed"
                 log.info("Using managed FFmpeg at %s", self.ffmpeg_path)
                 log.info("Using managed ffprobe at %s", self.ffprobe_path)
                 return True
@@ -174,16 +186,30 @@ class FFmpegManager:
                     self.ffmpeg_root,
                 )
 
-        ff = shutil.which(self._exe("ffmpeg"))
-        fp = shutil.which(self._exe("ffprobe"))
-        if ff and fp:
-            ffp, fpp = Path(ff), Path(fp)
-            if self._binary_runs(ffp):
-                self.ffmpeg_path = ffp
-                self.ffprobe_path = fpp
-                log.info("Using system FFmpeg at %s", self.ffmpeg_path)
-                log.info("Using system ffprobe at %s", self.ffprobe_path)
-                return True
+        # No managed install — hook on to an existing system one, found
+        # via PATH or well-known package-manager locations (Homebrew,
+        # winget, Chocolatey, Scoop, MacPorts, snap, /usr/bin, …).
+        for cand in find_system_ffmpeg(self.platform):
+            if cand.ffprobe is None or not cand.ffprobe.exists():
+                log.warning(
+                    "Found ffmpeg at %s (%s) but no ffprobe next to it; "
+                    "skipping", cand.path, cand.origin,
+                )
+                continue
+            if not self._binary_runs(cand.path):
+                log.warning(
+                    "System ffmpeg at %s (%s) failed to run; skipping",
+                    cand.path, cand.origin,
+                )
+                continue
+            self.ffmpeg_path = cand.path
+            self.ffprobe_path = cand.ffprobe
+            self.source = FFmpegSource.SYSTEM
+            self.source_origin = cand.origin
+            log.info("Using system FFmpeg (%s) at %s",
+                     cand.origin, self.ffmpeg_path)
+            log.info("Using system ffprobe at %s", self.ffprobe_path)
+            return True
 
         return False
 
@@ -263,6 +289,10 @@ class FFmpegManager:
 
         Never raises for network errors — returns UpdateStatus.UNKNOWN instead.
         Only returns UPDATE_AVAILABLE when a *confirmed* newer build exists.
+
+        System installs (brew, winget, apt, …) are updated by whoever
+        installed them, so this returns UNKNOWN with the matching
+        package-manager upgrade hint instead of hitting the network.
         """
         if not self.ffmpeg_path or not Path(self.ffmpeg_path).exists():
             return UpdateCheck(UpdateStatus.NOT_INSTALLED)
@@ -273,16 +303,18 @@ class FFmpegManager:
             log.info("Could not read local FFmpeg version: %s", e)
             return UpdateCheck(UpdateStatus.UNKNOWN, detail="local version unreadable")
 
-        try:
-            url, _ = self.artifact_url()
-        except FFmpegError as e:
-            return UpdateCheck(UpdateStatus.UNKNOWN, local_version=local_version,
-                               detail=str(e))
+        if self.source is FFmpegSource.SYSTEM:
+            return UpdateCheck(
+                UpdateStatus.UNKNOWN,
+                local_version=local_version,
+                detail=f"system install — update via {update_hint(self.source_origin)}",
+            )
 
+        # Managed install: compare against the source we download from.
         try:
-            if "BtbN" in url:
+            if self.platform.os is OSType.WINDOWS:
                 return self._check_btbn(local_version, timeout)
-            if "evermeet" in url:
+            if self.platform.os is OSType.MACOS:
                 return self._check_evermeet(local_version, timeout)
             # No reliable remote metadata endpoint for this source
             return UpdateCheck(UpdateStatus.UNKNOWN, local_version=local_version,
@@ -516,6 +548,8 @@ class FFmpegManager:
 
             self.ffmpeg_path = root / src_ffmpeg.name
             self.ffprobe_path = root / src_ffprobe.name
+            self.source = FFmpegSource.MANAGED
+            self.source_origin = "app-managed"
         except Exception:
             if backup.exists() and not root.exists():
                 try:

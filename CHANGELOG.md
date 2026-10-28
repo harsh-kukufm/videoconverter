@@ -6,6 +6,42 @@ The format is based on `Keep a Changelog <https://keepachangelog.com/en/1.1.0/>`
 and this project adheres to `Semantic Versioning <https://semver.org/spec/v2.0.0.html>`_.
 
 
+[0.2.1] - 2026-10-28
+--------------------
+
+### Added
+- Automatic discovery of an existing FFmpeg install. After the managed
+  directory and the process `PATH`, the app now scans well-known
+  package-manager locations — Homebrew (`/opt/homebrew/bin`,
+  `/usr/local/bin`, Linuxbrew), MacPorts, winget (user and machine
+  `WinGet\Links`), Chocolatey, Scoop, snap, `/usr/bin`, and common
+  manual-install directories — plus the persisted Windows `PATH`
+  registry entries (HKCU/HKLM), which a running GUI process can miss
+  right after a `winget install`. Discovered installs are validated
+  (`ffmpeg -version`) before use and labelled with their origin in the
+  Environment panel.
+- Package-manager-aware update guidance: system installs show the
+  matching upgrade command in the log and Setup tooltip
+  (`brew upgrade ffmpeg`, `winget upgrade Gyan.FFmpeg`,
+  `choco upgrade ffmpeg`, `scoop update ffmpeg`,
+  `sudo snap refresh ffmpeg`, …), and the Setup button becomes
+  "Install Managed FFmpeg" to download an app-managed copy as an
+  explicit override.
+
+### Changed
+- `FFmpegManager` now records where the located FFmpeg came from
+  (`FFmpegSource`: app-managed vs system) and prefers the app-managed
+  copy when both exist, preserving in-app updates for existing users.
+
+### Fixed
+- `check_for_update()` called a non-existent `artifact_url()` method
+  (left over from the multi-artifact download refactor), so every
+  startup update check failed with an `AttributeError` and the
+  "Update FFmpeg" button never appeared. Source dispatch now goes
+  through the platform (BtbN for Windows, evermeet for macOS) instead
+  of the download URL list.
+
+
 [0.2.0] - 2026-09-13
 --------------------
 

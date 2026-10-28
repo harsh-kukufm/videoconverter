@@ -25,13 +25,24 @@ and packaged with [Briefcase](https://briefcase.readthedocs.io/).
 - **Quality-targeted encoding** (CRF / CQ / QP) rather than a fixed
   bitrate — output size depends on content, but typical 4K → 1080p
   reductions are 70–95 %.
-- **Managed FFmpeg installation.** The app downloads, validates, and
-  atomically installs the correct FFmpeg build for the current
+- **Zero-setup FFmpeg.** On startup the app first looks for FFmpeg you
+  already have: in its managed directory, on `PATH`, and in well-known
+  package-manager locations — Homebrew (macOS/Linuxbrew), MacPorts,
+  winget, Chocolatey, Scoop, snap, and `/usr/bin` — including spots a
+  GUI app's `PATH` typically misses. An existing install is adopted
+  automatically and labelled with its origin.
+- **One-click managed install.** If no FFmpeg is found (or you prefer a
+  self-contained copy), the Setup button downloads, validates, and
+  atomically installs the correct build for the current
   OS/architecture. A previous known-good install is preserved for
   rollback.
-- **Update detection.** The Setup button only offers *Update* when a
-  genuinely newer build is available at the source; otherwise it
-  offers *Setup* (first install) or *Reinstall*.
+- **Update detection.** App-managed installs are compared against their
+  download source (BtbN / evermeet), so the Setup button only offers
+  *Update* when a genuinely newer build exists; otherwise it offers
+  *Setup* (first install) or *Reinstall*. System installs instead show
+  the matching package-manager upgrade command
+  (`brew upgrade ffmpeg`, `winget upgrade Gyan.FFmpeg`, …) and an
+  optional "Install Managed FFmpeg" action.
 - **Robust batch conversion** with per-file state, overall progress,
   cancellation, and cleanup of partial output.
 - **Rotating persistent logs** in a platform-appropriate directory.
@@ -44,8 +55,9 @@ and packaged with [Briefcase](https://briefcase.readthedocs.io/).
 
 - Python **3.11+**
 - OS: Windows 10/11, macOS 12+, or a modern Linux distribution
-- Internet access on first launch (to fetch FFmpeg) unless FFmpeg is
-  already on `PATH`
+- Internet access on first launch (to fetch FFmpeg) — not needed if an
+  FFmpeg installed via brew, winget, or a system package manager is
+  found
 
 Python dependencies (see `requirements.txt`):
 
@@ -74,10 +86,11 @@ On first launch the app will:
 
 1. Detect the OS, CPU architecture, and available GPU(s).
 2. Look for FFmpeg in the managed directory
-   (`.../VideoConverter/ffmpeg/`), then on `PATH`.
-3. If not found, offer to download the correct build for your platform.
-
-No manual FFmpeg installation is required.
+   (`.../VideoConverter/ffmpeg/`), then on `PATH`, then in well-known
+   package-manager locations (Homebrew, winget, Chocolatey, Scoop,
+   MacPorts, snap, `/usr/bin`, plus the persisted Windows `PATH`).
+3. Adopt the first install that actually runs, or offer to download
+   the correct build for your platform if none exists.
 
 ---
 

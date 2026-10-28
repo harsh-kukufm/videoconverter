@@ -21,6 +21,7 @@ from .core.converter import ConversionSettings, ConversionWorker
 from .core.ffmpeg_manager import (
     FFmpegError,
     FFmpegManager,
+    FFmpegSource,
     UpdateCheck,
     UpdateStatus,
 )
@@ -28,6 +29,7 @@ from .core.hardware import Backend, BackendInfo, HardwareDetector
 from .core.jobs import ConversionJob, JobState
 from .core.logging_setup import QueueLogHandler, setup_logging
 from .core.platform_info import PlatformInfo
+from .core.system_ffmpeg import update_hint
 
 VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".ts", ".flv")
 
@@ -80,6 +82,8 @@ from dataclasses import dataclass
 @dataclass
 class StartupResult:
     ffmpeg_found: bool
+    source: str = FFmpegSource.NONE.value
+    origin: str = ""
     backend_label: str = "CPU"
     backend_encoder: str = "libx265"
     message: str = ""
@@ -119,7 +123,17 @@ class StartupWorker(QThread):
                 return
 
             result.ffmpeg_found = True
-            self.log_line.emit(f"FFmpeg: {self.ffmpeg.ffmpeg_path}")
+            result.source = self.ffmpeg.source.value
+            result.origin = self.ffmpeg.source_origin
+            self.log_line.emit(
+                f"FFmpeg ({self.ffmpeg.source_origin}): "
+                f"{self.ffmpeg.ffmpeg_path}"
+            )
+            if self.ffmpeg.source is FFmpegSource.SYSTEM:
+                self.log_line.emit(
+                    f"This install is managed by {self.ffmpeg.source_origin}; "
+                    f"update it via '{update_hint(self.ffmpeg.source_origin)}'"
+                )
 
             try:
                 detector = HardwareDetector(self.platform, self.ffmpeg)
@@ -367,7 +381,10 @@ class MainWindow(QMainWindow):
 
     def _on_startup_ready(self, result: StartupResult) -> None:
         if result.ffmpeg_found:
-            self.ffmpeg_label.setText(f"FFmpeg: {self.ffmpeg.ffmpeg_path}")
+            origin = result.origin or "system"
+            self.ffmpeg_label.setText(
+                f"FFmpeg: {self.ffmpeg.ffmpeg_path} ({origin})"
+            )
             try:
                 det = HardwareDetector(self.platform, self.ffmpeg)
                 self._backend = det.select_backend()
@@ -383,7 +400,9 @@ class MainWindow(QMainWindow):
                 self._backend = None
         else:
             self.ffmpeg_label.setText(
-                "FFmpeg: not found — click 'Setup FFmpeg'"
+                "FFmpeg: not found — click 'Setup FFmpeg' to download, or "
+                "install it with brew/winget/your package manager and "
+                "reopen the app"
             )
             self.gpu_label.setText(
                 f"Hardware acceleration: {result.backend_label}"
@@ -395,7 +414,20 @@ class MainWindow(QMainWindow):
         status = result.update_status
         if not result.ffmpeg_found or status == UpdateStatus.NOT_INSTALLED.value:
             self.setup_button.setText("Setup FFmpeg")
-            self.setup_button.setToolTip("Download and install FFmpeg")
+            self.setup_button.setToolTip(
+                "Download and install FFmpeg. An existing install from "
+                "brew, winget, or your system package manager is picked "
+                "up automatically on the next launch."
+            )
+            return
+
+        if result.source == FFmpegSource.SYSTEM.value:
+            self.setup_button.setText("Install Managed FFmpeg")
+            self.setup_button.setToolTip(
+                f"Using the system FFmpeg ({result.origin}). To update it, "
+                f"run: {update_hint(result.origin)} — or click to download "
+                "a copy managed by this app instead."
+            )
             return
 
         if status == UpdateStatus.UPDATE_AVAILABLE.value:
@@ -444,7 +476,9 @@ class MainWindow(QMainWindow):
         self.setup_button.setEnabled(True)
         self.cancel_setup_button.setEnabled(False)
         if ok:
-            self.ffmpeg_label.setText(f"FFmpeg: {self.ffmpeg.ffmpeg_path}")
+            self.ffmpeg_label.setText(
+                f"FFmpeg: {self.ffmpeg.ffmpeg_path} (app-managed)"
+            )
             play_notification()
             # Re-run detection; skip the network roundtrip since we *just*
             # installed the current release.
