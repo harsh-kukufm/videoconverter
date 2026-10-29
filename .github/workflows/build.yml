@@ -62,7 +62,7 @@ jobs:
             runner:  windows-latest
             target:  windows
           - label:   macOS Universal
-            runner:  macos-14
+            runner:  macos-15
             target:  macOS
 
     steps:
