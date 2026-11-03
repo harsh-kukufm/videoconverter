@@ -12,7 +12,9 @@ author_email = "th3.a6add0n@gmail.com"
 [tool.briefcase.app.videoconverter]
 formal_name = "Video Converter"
 description = "This app lets you downsize big video files. It converts video to H.265 using GPU"
+long_description = """Video Converter downsizes large video files by re-encoding them to H.265/HEVC.
 
+It automatically picks the best hardware encoder available on your machine (NVIDIA NVENC, AMD AMF, AMD/Intel VAAPI, or Apple VideoToolbox) and falls back to a high quality CPU (libx265) encode otherwise. Output files are written to a converted_videos folder next to the source, validated with ffprobe, and only replace the final filename after a complete encode."""
 sources = [
     "src/videoconverter",
 ]
