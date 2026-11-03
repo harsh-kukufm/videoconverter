@@ -47,8 +47,9 @@ jobs:
   #   macOS Universal -> .dmg  (Universal 2 arm64 + x86_64, built on an
   #                              Apple Silicon runner because
   #                              pyproject.toml declares universal_build)
-  #   Linux deb       -> .deb  (briefcase "system" backend; fast, uses the
-  #                              curated Debian runtime deps)
+  #   Linux deb       -> .deb  (briefcase "system" backend, docker-targeted
+  #                              at debian:12 to match the curated
+  #                              [linux.system.debian] runtime deps)
   #   Linux Flatpak   -> .flatpak (org.kde.Platform 6.9 runtime)
   #
   # Briefcase CLI forms used here:
@@ -57,6 +58,12 @@ jobs:
   #   briefcase package <platform> <output-format> [-p <packaging-format>]
   # where -p only exists on the package command (it selects deb/rpm/pkg
   # inside the system backend).
+  #
+  # The deb job passes --target debian:12: without a docker target the
+  # system backend refuses to run when Briefcase itself is executed by a
+  # non-system Python (setup-python's toolcache interpreter), and the
+  # docker target additionally pins the produced .deb to the Debian
+  # runtime the pyproject deps were curated for.
   #
   # No Linux AppImage: with PySide6 >= 6.6.2, briefcase-built AppImages
   # segfault at startup due to a bug in the linuxdeploy Qt plugin
@@ -82,21 +89,25 @@ jobs:
             target:       windows
             format_args:  ""
             pkg_args:     ""
+            docker_args:  ""
           - label:        macOS Universal
             runner:       macos-15
             target:       macOS
             format_args:  ""
             pkg_args:     ""
+            docker_args:  ""
           - label:        Linux deb
             runner:       ubuntu-latest
             target:       linux
             format_args:  system
             pkg_args:     "--packaging-format deb"
+            docker_args:  "--target debian:12"
           - label:        Linux Flatpak
             runner:       ubuntu-latest
             target:       linux
             format_args:  flatpak
             pkg_args:     ""
+            docker_args:  ""
 
     steps:
       - uses: actions/checkout@v4
@@ -155,15 +166,19 @@ jobs:
           grep -E '^version\s*=' pyproject.toml
 
       - name: Briefcase create
-        run: briefcase create ${{ matrix.target }} ${{ matrix.format_args }}
+        run: >-
+          briefcase create ${{ matrix.target }} ${{ matrix.format_args }}
+          ${{ matrix.docker_args }}
 
       - name: Briefcase build
-        run: briefcase build ${{ matrix.target }} ${{ matrix.format_args }}
+        run: >-
+          briefcase build ${{ matrix.target }} ${{ matrix.format_args }}
+          ${{ matrix.docker_args }}
 
       - name: Briefcase package
         run: >-
           briefcase package ${{ matrix.target }} ${{ matrix.format_args }}
-          ${{ matrix.pkg_args }} --adhoc-sign
+          ${{ matrix.pkg_args }} ${{ matrix.docker_args }} --adhoc-sign
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
