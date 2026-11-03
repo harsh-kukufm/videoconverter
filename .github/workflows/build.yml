@@ -47,8 +47,16 @@ jobs:
   #   macOS Universal -> .dmg  (Universal 2 arm64 + x86_64, built on an
   #                              Apple Silicon runner because
   #                              pyproject.toml declares universal_build)
-  #   Linux deb       -> .deb  (fast, uses the curated Debian runtime deps)
+  #   Linux deb       -> .deb  (briefcase "system" backend; fast, uses the
+  #                              curated Debian runtime deps)
   #   Linux Flatpak   -> .flatpak (org.kde.Platform 6.9 runtime)
+  #
+  # Briefcase CLI forms used here:
+  #   briefcase create <platform> <output-format>   format is POSITIONAL
+  #   briefcase build  <platform> <output-format>
+  #   briefcase package <platform> <output-format> [-p <packaging-format>]
+  # where -p only exists on the package command (it selects deb/rpm/pkg
+  # inside the system backend).
   #
   # No Linux AppImage: with PySide6 >= 6.6.2, briefcase-built AppImages
   # segfault at startup due to a bug in the linuxdeploy Qt plugin
@@ -69,22 +77,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label:     Windows x64
-            runner:    windows-latest
-            target:    windows
-            fmt_args:  ""
-          - label:     macOS Universal
-            runner:    macos-15
-            target:    macOS
-            fmt_args:  ""
-          - label:     Linux deb
-            runner:    ubuntu-latest
-            target:    linux
-            fmt_args:  "--packaging-format deb"
-          - label:     Linux Flatpak
-            runner:    ubuntu-latest
-            target:    linux
-            fmt_args:  "--packaging-format flatpak"
+          - label:        Windows x64
+            runner:       windows-latest
+            target:       windows
+            format_args:  ""
+            pkg_args:     ""
+          - label:        macOS Universal
+            runner:       macos-15
+            target:       macOS
+            format_args:  ""
+            pkg_args:     ""
+          - label:        Linux deb
+            runner:       ubuntu-latest
+            target:       linux
+            format_args:  system
+            pkg_args:     "--packaging-format deb"
+          - label:        Linux Flatpak
+            runner:       ubuntu-latest
+            target:       linux
+            format_args:  flatpak
+            pkg_args:     ""
 
     steps:
       - uses: actions/checkout@v4
@@ -102,7 +114,7 @@ jobs:
           python -m pip install briefcase
 
       - name: Install Flatpak tooling
-        if: matrix.fmt_args == '--packaging-format flatpak'
+        if: matrix.format_args == 'flatpak'
         run: |
           sudo apt-get update
           sudo apt-get install -y flatpak flatpak-builder
@@ -143,13 +155,15 @@ jobs:
           grep -E '^version\s*=' pyproject.toml
 
       - name: Briefcase create
-        run: briefcase create ${{ matrix.target }} ${{ matrix.fmt_args }}
+        run: briefcase create ${{ matrix.target }} ${{ matrix.format_args }}
 
       - name: Briefcase build
-        run: briefcase build ${{ matrix.target }} ${{ matrix.fmt_args }}
+        run: briefcase build ${{ matrix.target }} ${{ matrix.format_args }}
 
       - name: Briefcase package
-        run: briefcase package ${{ matrix.target }} ${{ matrix.fmt_args }} --adhoc-sign
+        run: >-
+          briefcase package ${{ matrix.target }} ${{ matrix.format_args }}
+          ${{ matrix.pkg_args }} --adhoc-sign
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
