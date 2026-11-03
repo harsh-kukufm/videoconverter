@@ -6,6 +6,42 @@ The format is based on `Keep a Changelog <https://keepachangelog.com/en/1.1.0/>`
 and this project adheres to `Semantic Versioning <https://semver.org/spec/v2.0.0.html>`_.
 
 
+[0.2.3] - 2026-11-04
+--------------------
+
+### Fixed
+- macOS FFmpeg download was broken: evermeet.cx retired the
+  `/getrelease/zip` shortcut URLs (HTTP 410 Gone). The manager now
+  resolves the current *versioned* zip for each tool through the
+  evermeet.cx JSON info API (the same endpoint the update check already
+  used) and validates the binary after extraction. evermeet.cx remains
+  the source: it is the macOS static-build provider listed on
+  ffmpeg.org, publishes GPG-signed releases, and is the macOS
+  counterpart of BtbN (which builds only Windows and Linux).
+- macOS now also installs `ffplay` alongside ffmpeg and ffprobe. It is
+  treated as optional: the app itself never calls ffplay, so a failed
+  ffplay download is logged and skipped instead of failing the install.
+- The FFmpeg update check crashed on Windows and Linux
+  (`FFmpegManager.check_for_update()` called a non-existent
+  `artifact_url()` method), so the GUI never reported update status.
+  The check now selects the metadata source by platform: BtbN release
+  date on Windows, evermeet version on macOS, "unknown" elsewhere.
+- The CI workflow built no Linux artifacts. It now packages Debian
+  (.deb) and Flatpak (.flatpak) alongside the Windows MSI and macOS
+  DMG, and the release job collects .deb/.flatpak/.AppImage/.rpm
+  files. No AppImage in CI: with PySide6 >= 6.6.2, briefcase-built
+  AppImages segfault at startup due to an upstream linuxdeploy Qt
+  plugin bug (beeware/briefcase#1908).
+- The linux appimage section now declares the linuxdeploy `qt` plugin
+  so locally built AppImages bundle the Qt runtime resources, and the
+  `# ?? FIXME` placeholder was removed.
+
+### Changed
+- Unit tests added for evermeet info-API URL resolution, static
+  Windows/Linux artifact URLs, and the update check's no-network
+  NOT_INSTALLED path; the test matrix in CI now also runs on Ubuntu.
+
+
 [0.2.0] - 2026-09-13
 --------------------
 

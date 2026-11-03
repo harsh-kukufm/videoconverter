@@ -2,7 +2,7 @@
 [tool.briefcase]
 project_name = "Video Converter"
 bundle = "com.videoconverter"
-version = "0.2.0"
+version = "0.2.3"
 url = "https://github.com/Th3-A6add0n"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -95,9 +95,11 @@ system_runtime_requires = [
 [tool.briefcase.app.videoconverter.linux.appimage]
 manylinux = "manylinux_2_28"
 system_requires = [
-# ?? FIXME
 ]
+# Qt apps need the linuxdeploy Qt plugin so the Qt runtime resources
+# (platforms, styles, imageformats) are bundled into the AppImage.
 linuxdeploy_plugins = [
+    "qt",
 ]
 
 [tool.briefcase.app.videoconverter.linux.flatpak]

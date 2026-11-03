@@ -117,12 +117,27 @@ def _parse_semver(version_line: str) -> Optional[tuple[int, int, int]]:
     return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
 
 
+# evermeet.cx hosts ffmpeg, ffprobe and ffplay as separate universal zips.
+# The old /getrelease/zip shortcut URLs were retired (HTTP 410 Gone); the
+# documented JSON info API remains and returns the current versioned URL.
+_EVERMEET_INFO_URL = "https://evermeet.cx/ffmpeg/info/{tool}/release"
+
+
+def _evermeet_zip_url(info: dict) -> str:
+    """Extract the versioned zip download URL from an evermeet info payload."""
+    try:
+        return str(info["download"]["zip"]["url"])
+    except (KeyError, TypeError):
+        raise FFmpegError("evermeet info payload has no zip download URL")
+
+
 class FFmpegManager:
     def __init__(self, platform: PlatformInfo, ffmpeg_root: Optional[Path] = None):
         self.platform = platform
         self.ffmpeg_root = ffmpeg_root or cfg.ffmpeg_dir()
         self.ffmpeg_path: Optional[Path] = None
         self.ffprobe_path: Optional[Path] = None
+        self.ffplay_path: Optional[Path] = None
         self.capabilities: Optional[FFmpegCapabilities] = None
 
     # ------------------------------------------------------------------ locate
@@ -130,20 +145,18 @@ class FFmpegManager:
     def _exe(self, name: str) -> str:
         return name + self.platform.exe_suffix
 
-    def _find_binaries(self, root: Path) -> Optional[tuple[Path, Optional[Path]]]:
-        ff_name = self._exe("ffmpeg")
-        fp_name = self._exe("ffprobe")
-        ff = fp = None
+    def _find_single(self, root: Path, name: str) -> Optional[Path]:
+        exe = self._exe(name)
         for p in root.rglob("*"):
-            if p.is_file() and not ff and p.name == ff_name:
-                ff = p
-            if p.is_file() and not fp and p.name == fp_name:
-                fp = p
-            if ff and fp:
-                break
-        if ff:
-            return ff, fp
+            if p.is_file() and p.name == exe:
+                return p
         return None
+
+    def _find_binaries(self, root: Path) -> Optional[tuple[Path, Optional[Path]]]:
+        ff = self._find_single(root, "ffmpeg")
+        if ff is None:
+            return None
+        return ff, self._find_single(root, "ffprobe")
 
     def _binary_runs(self, ffmpeg: Path) -> bool:
         try:
@@ -164,6 +177,7 @@ class FFmpegManager:
                     and Path(found[1]).exists():
                 self.ffmpeg_path = found[0]
                 self.ffprobe_path = found[1]
+                self.ffplay_path = self._find_single(self.ffmpeg_root, "ffplay")
                 log.info("Using managed FFmpeg at %s", self.ffmpeg_path)
                 log.info("Using managed ffprobe at %s", self.ffprobe_path)
                 return True
@@ -181,6 +195,8 @@ class FFmpegManager:
             if self._binary_runs(ffp):
                 self.ffmpeg_path = ffp
                 self.ffprobe_path = fpp
+                fpl = shutil.which(self._exe("ffplay"))
+                self.ffplay_path = Path(fpl) if fpl else None
                 log.info("Using system FFmpeg at %s", self.ffmpeg_path)
                 log.info("Using system ffprobe at %s", self.ffprobe_path)
                 return True
@@ -196,9 +212,9 @@ class FFmpegManager:
             raise FFmpegError("FFmpeg not located")
 
         caps = FFmpegCapabilities()
+        version_out = self._run_text(["-version"])
         caps.version_line = (
-            self._run_text(["-version"]).splitlines()[0]
-            if self.ffmpeg_path else ""
+            version_out.splitlines()[0] if version_out.strip() else ""
         )
         caps.encoders = _parse_ffmpeg_list(
             self._run_text(["-hide_banner", "-encoders"])
@@ -274,17 +290,13 @@ class FFmpegManager:
             return UpdateCheck(UpdateStatus.UNKNOWN, detail="local version unreadable")
 
         try:
-            url, _ = self.artifact_url()
-        except FFmpegError as e:
-            return UpdateCheck(UpdateStatus.UNKNOWN, local_version=local_version,
-                               detail=str(e))
-
-        try:
-            if "BtbN" in url:
-                return self._check_btbn(local_version, timeout)
-            if "evermeet" in url:
+            if self.platform.os is OSType.MACOS:
                 return self._check_evermeet(local_version, timeout)
-            # No reliable remote metadata endpoint for this source
+            # Windows builds come from BtbN, whose GitHub release carries a
+            # usable published_at date. The Linux source (johnvansickle) has
+            # no remote metadata endpoint.
+            if self.platform.os is OSType.WINDOWS:
+                return self._check_btbn(local_version, timeout)
             return UpdateCheck(UpdateStatus.UNKNOWN, local_version=local_version,
                                detail="no remote metadata available")
         except Exception as e:
@@ -365,12 +377,27 @@ class FFmpegManager:
         return UpdateCheck(UpdateStatus.UP_TO_DATE,
                            local_version=local_s, remote_version=remote_s)
 
+    def _evermeet_artifact_url(
+        self, tool: str, timeout: float = 15.0,
+    ) -> tuple[str, str]:
+        """Resolve the current versioned zip URL for one evermeet.cx tool."""
+        r = requests.get(
+            _EVERMEET_INFO_URL.format(tool=tool),
+            timeout=timeout,
+            headers={"User-Agent": "VideoConverter/0.2",
+                     "Accept": "application/json"},
+        )
+        r.raise_for_status()
+        return _evermeet_zip_url(r.json()), ".zip"
+
     def artifact_urls(self) -> list[tuple[str, str]]:
-        """Return a list of (url, extension) pairs for the current platform.
+        """Return the (url, extension) pairs that must be downloaded.
 
         Most platforms ship a single archive containing both ffmpeg and ffprobe.
-        macOS is the exception: evermeet.cx publishes ffmpeg and ffprobe as
-        separate universal (Intel + Apple Silicon) archives.
+        macOS is the exception: evermeet.cx publishes ffmpeg, ffprobe and ffplay
+        as separate universal (Intel + Apple Silicon) zips. The retired
+        /getrelease/zip shortcuts (HTTP 410) are replaced by one small JSON
+        info-API request per tool, which returns the current versioned URL.
         """
         o, a = self.platform.os, self.platform.arch
 
@@ -387,10 +414,11 @@ class FFmpegManager:
 
         if o is OSType.MACOS:
             # evermeet.cx builds are universal binaries and work on both
-            # Intel and Apple Silicon. ffmpeg and ffprobe come as separate zips.
+            # Intel and Apple Silicon. ffmpeg and ffprobe come as separate
+            # zips (ffplay is fetched separately as an optional extra).
             return [
-                ("https://evermeet.cx/ffmpeg/getrelease/zip",  ".zip"),
-                ("https://evermeet.cx/ffprobe/getrelease/zip", ".zip"),
+                self._evermeet_artifact_url(tool)
+                for tool in ("ffmpeg", "ffprobe")
             ]
 
         if o is OSType.LINUX:
@@ -411,7 +439,17 @@ class FFmpegManager:
         progress_cb: Optional[Callable[[int, str], None]] = None,
         cancel_cb: Optional[Callable[[], bool]] = None,
     ) -> None:
-        artifacts = self.artifact_urls()
+        # (url, extension, required). On macOS, ffplay is a nice-to-have: the
+        # app itself never calls it, so a failed ffplay download is not fatal.
+        artifacts: list[tuple[str, str, bool]] = [
+            (url, ext, True) for url, ext in self.artifact_urls()
+        ]
+        if self.platform.os is OSType.MACOS:
+            try:
+                ffplay_url, ffplay_ext = self._evermeet_artifact_url("ffplay")
+                artifacts.append((ffplay_url, ffplay_ext, False))
+            except Exception as e:
+                log.warning("Could not resolve ffplay download URL: %s", e)
 
         def emit(pct: int, msg: str) -> None:
             log.info("FFmpeg install: %s%% %s", pct, msg)
@@ -426,7 +464,7 @@ class FFmpegManager:
             extract_root.mkdir()
 
             n = len(artifacts)
-            for i, (url, ext) in enumerate(artifacts):
+            for i, (url, ext, required) in enumerate(artifacts):
                 base = int((i / n) * 85)
                 span = int(85 / n)
                 archive = tmp / f"artifact_{i}{ext}"
@@ -438,15 +476,24 @@ class FFmpegManager:
                          f"Downloading {_i + 1}/{n}: "
                          f"{done // (1024 * 1024)} MiB")
 
-                download_file(url, archive,
-                              progress_cb=dl_progress, cancel_cb=cancel_cb)
-                if cancel_cb and cancel_cb():
-                    raise DownloadError("Cancelled")
+                try:
+                    download_file(url, archive,
+                                  progress_cb=dl_progress, cancel_cb=cancel_cb)
+                    if cancel_cb and cancel_cb():
+                        raise DownloadError("Cancelled")
 
-                if ext == ".zip":
-                    safe_extract_zip(archive, extract_root)
-                else:
-                    safe_extract_tar(archive, extract_root)
+                    if ext == ".zip":
+                        safe_extract_zip(archive, extract_root)
+                    else:
+                        safe_extract_tar(archive, extract_root)
+                except Exception as e:
+                    # A user cancellation must always abort the install; a
+                    # failed *optional* artifact is only logged.
+                    if required or (cancel_cb and cancel_cb()):
+                        raise
+                    log.warning("Optional artifact %s failed: %s", url, e)
+                    emit(min(base + span, 85), f"Skipped optional download: {e}")
+                    continue
 
             emit(88, "Locating binaries…")
             found = self._find_binaries(extract_root)
@@ -454,6 +501,7 @@ class FFmpegManager:
                 raise FFmpegError("No ffmpeg binary found in downloaded archives")
 
             src_ffmpeg, src_ffprobe = found
+            src_ffplay = self._find_single(extract_root, "ffplay")
 
             if src_ffprobe is None or not src_ffprobe.exists():
                 raise FFmpegError(
@@ -466,7 +514,7 @@ class FFmpegManager:
                 raise FFmpegError("Downloaded ffmpeg failed validation")
 
             emit(96, "Installing atomically…")
-            self._atomic_install(src_ffmpeg, src_ffprobe)
+            self._atomic_install(src_ffmpeg, src_ffprobe, src_ffplay)
 
             self.capabilities = None
             emit(100, "FFmpeg installed")
@@ -475,7 +523,12 @@ class FFmpegManager:
             except FFmpegError:
                 pass
 
-    def _atomic_install(self, src_ffmpeg: Path, src_ffprobe: Path) -> None:
+    def _atomic_install(
+        self,
+        src_ffmpeg: Path,
+        src_ffprobe: Path,
+        src_ffplay: Optional[Path] = None,
+    ) -> None:
         if not src_ffprobe or not src_ffprobe.exists():
             raise FFmpegError(
                 "Refusing to install: ffprobe missing from downloaded payload"
@@ -498,6 +551,11 @@ class FFmpegManager:
             shutil.copy2(src_ffmpeg, tgt_ff)
             shutil.copy2(src_ffprobe, tgt_fp)
 
+            tgt_fpl: Optional[Path] = None
+            if src_ffplay is not None and src_ffplay.exists():
+                tgt_fpl = staging / src_ffplay.name
+                shutil.copy2(src_ffplay, tgt_fpl)
+
             for p in (tgt_ff, tgt_fp):
                 try:
                     os.chmod(p, p.stat().st_mode
@@ -516,6 +574,10 @@ class FFmpegManager:
 
             self.ffmpeg_path = root / src_ffmpeg.name
             self.ffprobe_path = root / src_ffprobe.name
+            self.ffplay_path = (
+                root / src_ffplay.name
+                if src_ffplay is not None and src_ffplay.exists() else None
+            )
         except Exception:
             if backup.exists() and not root.exists():
                 try:

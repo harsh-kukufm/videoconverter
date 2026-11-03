@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -41,11 +41,22 @@ jobs:
         run: pytest -q tests/
 
   # ---------------------------------------------------------------------
-  # Package on Windows x64 and a single universal macOS build.
+  # Package every supported desktop target.
   #
-  # The macOS build runs on an Apple Silicon runner (macos-14) and
-  # produces a Universal 2 .app containing both arm64 and x86_64 slices,
-  # because pyproject.toml declares universal_build = true.
+  #   Windows x64     -> .msi
+  #   macOS Universal -> .dmg  (Universal 2 arm64 + x86_64, built on an
+  #                              Apple Silicon runner because
+  #                              pyproject.toml declares universal_build)
+  #   Linux deb       -> .deb  (fast, uses the curated Debian runtime deps)
+  #   Linux Flatpak   -> .flatpak (org.kde.Platform 6.9 runtime)
+  #
+  # No Linux AppImage: with PySide6 >= 6.6.2, briefcase-built AppImages
+  # segfault at startup due to a bug in the linuxdeploy Qt plugin
+  # (beeware/briefcase#1908), and AppImage is no longer a tested
+  # briefcase configuration. deb + flatpak are the supported formats.
+  #
+  # --adhoc-sign is a no-op outside macOS; it is accepted by the base
+  # briefcase package command on every platform.
   #
   # fail-fast is off so a single platform failure does not cancel the
   # others.
@@ -58,12 +69,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label:   Windows x64
-            runner:  windows-latest
-            target:  windows
-          - label:   macOS Universal
-            runner:  macos-15
-            target:  macOS
+          - label:     Windows x64
+            runner:    windows-latest
+            target:    windows
+            fmt_args:  ""
+          - label:     macOS Universal
+            runner:    macos-15
+            target:    macOS
+            fmt_args:  ""
+          - label:     Linux deb
+            runner:    ubuntu-latest
+            target:    linux
+            fmt_args:  "--packaging-format deb"
+          - label:     Linux Flatpak
+            runner:    ubuntu-latest
+            target:    linux
+            fmt_args:  "--packaging-format flatpak"
 
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +100,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install briefcase
+
+      - name: Install Flatpak tooling
+        if: matrix.fmt_args == '--packaging-format flatpak'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
 
       - name: Stamp version from tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -116,13 +143,13 @@ jobs:
           grep -E '^version\s*=' pyproject.toml
 
       - name: Briefcase create
-        run: briefcase create ${{ matrix.target }}
+        run: briefcase create ${{ matrix.target }} ${{ matrix.fmt_args }}
 
       - name: Briefcase build
-        run: briefcase build ${{ matrix.target }}
+        run: briefcase build ${{ matrix.target }} ${{ matrix.fmt_args }}
 
       - name: Briefcase package
-        run: briefcase package ${{ matrix.target }} --adhoc-sign
+        run: briefcase package ${{ matrix.target }} ${{ matrix.fmt_args }} --adhoc-sign
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -165,7 +192,8 @@ jobs:
           find artifacts -maxdepth 3 -type f || true
           count=$(find artifacts -type f \
             \( -name '*.msi' -o -name '*.zip' -o -name '*.dmg' \
-               -o -name '*.pkg' -o -name '*.AppImage' -o -name '*.flatpak' \) \
+               -o -name '*.pkg' -o -name '*.AppImage' -o -name '*.deb' \
+               -o -name '*.flatpak' -o -name '*.rpm' \) \
             | wc -l)
           echo "installer_count=$count" >> "$GITHUB_OUTPUT"
 
@@ -187,6 +215,10 @@ jobs:
             artifacts/**/*.zip
             artifacts/**/*.dmg
             artifacts/**/*.pkg
+            artifacts/**/*.AppImage
+            artifacts/**/*.deb
+            artifacts/**/*.flatpak
+            artifacts/**/*.rpm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
